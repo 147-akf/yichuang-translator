@@ -2,7 +2,8 @@
 
 一个面向 **Windows 10 / 11** 的置顶中英互译小工具。手动粘贴即可翻译，也可以开启自动读取剪贴板；支持四套外观、图片/视频壁纸和原文/译文窗口透明度。
 
-- 仓库：[147-akf/yichuang-translator](https://github.com/147-akf/yichuang-translator)（私有仓库，需有访问权限）
+- 仓库：[147-akf/yichuang-translator](https://github.com/147-akf/yichuang-translator)
+- 预编译版本：[GitHub Releases](https://github.com/147-akf/yichuang-translator/releases)
 - 翻译不需要 API Key，使用公开翻译接口
 - 翻译和主题不需要第三方依赖；壁纸功能可选安装 Pillow 和 OpenCV
 - 仅支持 Windows 10 / 11
@@ -48,7 +49,15 @@ git clone https://github.com/147-akf/yichuang-translator.git
 cd yichuang-translator
 ```
 
-也可以在 GitHub 页面下载 ZIP 后解压。仓库是私有的，需要先有访问权限。
+也可以在 GitHub 页面下载 ZIP 后解压。
+
+### 下载预编译版本
+
+如果不想安装 Python，可以直接从 Releases 下载 Windows 单文件 exe：
+
+https://github.com/147-akf/yichuang-translator/releases
+
+exe 未做代码签名，首次运行可能被 Windows SmartScreen 提示；可以选择“更多信息 → 仍要运行”。
 
 ### 安装依赖
 
@@ -116,7 +125,7 @@ build_exe.bat
 dist\YiChuangTranslator.exe
 ```
 
-由于包含 OpenCV，exe 体积会比较大，首次启动也会比直接运行源码慢一些。仓库本身不包含 exe，生成物在 `.gitignore` 中，不会被提交。
+由于包含 OpenCV，exe 体积会比较大，首次启动也会比直接运行源码慢一些。仓库源码中不包含 exe，生成物在 `.gitignore` 中，不会被提交；也可以直接从 [Releases](https://github.com/147-akf/yichuang-translator/releases) 下载预编译版本。
 
 ## 配置
 
@@ -245,7 +254,7 @@ python -m pip install -r requirements.txt
 build_exe.bat
 ```
 
-生成的文件是 `dist\YiChuangTranslator.exe`。仓库不包含预编译 exe；需要在本机运行脚本生成。
+生成的文件是 `dist\YiChuangTranslator.exe`。仓库源码中不包含预编译 exe；可以直接从 [Releases](https://github.com/147-akf/yichuang-translator/releases) 下载，或在本机运行脚本生成。
 
 ### 支持哪些系统？
 
@@ -296,6 +305,7 @@ python create_shortcut.py
   ```
 
 - Run with `pythonw translator.pyw`, or double-click `run.bat`; build an exe with `build_exe.bat`.
+- A prebuilt Windows exe is available on [GitHub Releases](https://github.com/147-akf/yichuang-translator/releases). It is unsigned, so Windows SmartScreen may ask for confirmation on first launch.
 
 Translation text is sent to Google's public endpoint, with MyMemory as a fallback. No text is stored locally. Wallpaper files stay on your computer.
 
