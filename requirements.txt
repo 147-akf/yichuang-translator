@@ -1,0 +1,4 @@
+# Optional dependencies, only needed for custom wallpapers.
+# Translation and themes work without these.
+Pillow>=10.0
+opencv-python-headless>=4.10

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Local settings and logs
+.desktop_translator.json
+*.log
+
+# OS files
+Thumbs.db
+desktop.ini
+.DS_Store
