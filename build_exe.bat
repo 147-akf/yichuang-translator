@@ -14,6 +14,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed ^
     --name "YiChuangTranslator" ^
     --icon "icon.ico" ^
     --add-data "icon.ico;." ^
+    --collect-all cv2 ^
     translator.pyw
 if errorlevel 1 goto :error
 

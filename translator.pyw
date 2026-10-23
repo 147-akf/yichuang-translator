@@ -345,6 +345,12 @@ class TranslatorApp:
         self._wallpaper_source = None
         self._wallpaper_photo = None
         self._image_render_job = None
+        self._image_session = 0
+        self._image_result = None
+        self._image_result_lock = threading.Lock()
+        self._image_poll_job = None
+        self._wallpaper_error_reported = False
+        self._alpha_warning = False
         self._scrim_job = None
         self._top_scrim_photo = None
         self._bottom_scrim_photo = None
@@ -363,6 +369,7 @@ class TranslatorApp:
         self._video_job = None
         self._video_target = (0, 0)
         self._video_paused = False
+        self._video_error = None
 
         self.topmost_var = tk.BooleanVar(value=bool(self.config["topmost"]))
         self.auto_var = tk.BooleanVar(value=bool(self.config["auto_translate"]))
@@ -374,6 +381,7 @@ class TranslatorApp:
         self._restore_state()
         self._poll_queue()
         self.root.after(40, self._layout_ui)
+        self.root.after(80, self._poll_image_result)
         self.root.after(160, self._restore_wallpaper)
         self.root.after(240, self._apply_text_alpha)
 
@@ -494,13 +502,13 @@ class TranslatorApp:
         self.root.option_add("*TCombobox*Listbox.selectBackground", c["select_bg"])
         self.root.option_add("*TCombobox*Listbox.selectForeground", c["select_fg"])
 
-    def _set_widget_alpha(self, widget: tk.Misc, alpha: int) -> None:
+    def _set_widget_alpha(self, widget: tk.Misc, alpha: int) -> bool:
         if sys.platform != "win32":
-            return
+            return False
         try:
             hwnd = widget.winfo_id()
             if not hwnd:
-                return
+                return False
             user32 = ctypes.windll.user32
             get_long = user32.GetWindowLongPtrW
             get_long.restype = ctypes.c_longlong
@@ -521,35 +529,59 @@ class TranslatorApp:
             if alpha >= 255:
                 if ex_style & layered:
                     set_long(ctypes.c_void_p(hwnd), -20, ex_style & ~layered)
-                return
+                return True
             if not (ex_style & layered):
                 set_long(ctypes.c_void_p(hwnd), -20, ex_style | layered)
-            set_alpha(ctypes.c_void_p(hwnd), 0, alpha, 0x00000002)
+            return bool(
+                set_alpha(ctypes.c_void_p(hwnd), 0, alpha, 0x00000002)
+            )
         except Exception:
-            pass
+            return False
 
-    def _apply_text_alpha(self) -> None:
+    def _apply_text_alpha(self, announce: bool = False) -> bool:
         if sys.platform != "win32":
-            return
+            if (
+                announce
+                and self.text_transparency > 0
+                and not self._alpha_warning
+            ):
+                self._alpha_warning = True
+                self._set_status(
+                    "当前系统不支持文字窗口透明度，文字窗口保持不透明",
+                    error=True,
+                )
+            return False
         if not hasattr(self, "input"):
-            return
+            return False
         alpha = int(
             round(255 * (1 - self.text_transparency / 100.0))
         )
         alpha = max(0, min(255, alpha))
+        ok = True
+        for widget in (self.input, self.output):
+            if not self._set_widget_alpha(widget, alpha):
+                ok = False
         for widget in (
-            self.input,
-            self.output,
             self.input_scroll,
             self.output_scroll,
             self.input_ph,
             self.output_ph,
         ):
             self._set_widget_alpha(widget, alpha)
+        if not ok and announce and self.text_transparency > 0:
+            if not self._alpha_warning:
+                self._alpha_warning = True
+                self._set_status(
+                    "当前系统不支持文字窗口透明度，文字窗口保持不透明",
+                    error=True,
+                )
+        elif ok:
+            self._alpha_warning = False
+        return ok
 
     def _set_text_transparency(self, value: int, save: bool = False) -> None:
         self.text_transparency = max(0, min(70, int(value)))
-        self._apply_text_alpha()
+        self._apply_text_alpha(announce=True)
         if save:
             self._save_config()
 
@@ -1606,6 +1638,7 @@ class TranslatorApp:
     def _select_theme(self, key: str) -> None:
         if key not in THEMES:
             return
+        self._cancel_image_load()
         if self._wallpaper_active():
             self._deactivate_wallpaper()
         self.theme_key = key
@@ -2023,44 +2056,141 @@ class TranslatorApp:
             if not self._apply_image_wallpaper(path, announce=True):
                 self._update_appearance_summary()
 
+    def _cancel_image_load(self) -> int:
+        with self._image_result_lock:
+            self._image_session += 1
+            self._image_result = None
+            return self._image_session
+
     def _apply_image_wallpaper(self, path: str, announce: bool = True) -> bool:
         if not HAS_PIL:
             return False
+        session = self._cancel_image_load()
+        target_w = self.canvas.winfo_width()
+        target_h = self.canvas.winfo_height()
+        screen_limit = (
+            max(
+                self.root.winfo_screenwidth(),
+                self.root.winfo_screenheight(),
+            )
+            * 2
+        )
+        if announce:
+            self._set_status(f"正在加载壁纸：{Path(path).name}…")
+        threading.Thread(
+            target=self._image_load_worker,
+            args=(
+                path,
+                session,
+                target_w,
+                target_h,
+                screen_limit,
+                announce,
+            ),
+            daemon=True,
+        ).start()
+        return True
+
+    def _image_load_worker(
+        self,
+        path: str,
+        session: int,
+        target_w: int,
+        target_h: int,
+        screen_limit: int,
+        announce: bool,
+    ) -> None:
         try:
             image = Image.open(path)
             image = ImageOps.exif_transpose(image)
             image = image.convert("RGB")
-            max_dim = (
-                max(
-                    self.root.winfo_screenwidth(),
-                    self.root.winfo_screenheight(),
+            if max(image.size) > screen_limit:
+                image.thumbnail((screen_limit, screen_limit), RESAMPLE)
+            fitted = None
+            if target_w >= 2 and target_h >= 2:
+                fitted = ImageOps.fit(
+                    image, (target_w, target_h), method=RESAMPLE
                 )
-                * 2
-            )
-            if max(image.size) > max_dim:
-                image.thumbnail((max_dim, max_dim), RESAMPLE)
+            result = ("ok", session, image, fitted, announce, path)
         except Exception as exc:
-            if announce:
-                messagebox.showerror(
-                    "无法打开图片", f"无法读取这个图片：\n{exc}", parent=self.root
-                )
-            else:
-                self._set_status("壁纸图片无法打开", error=True)
-            return False
+            result = ("error", session, str(exc), announce, path)
+        with self._image_result_lock:
+            if session == self._image_session:
+                self._image_result = result
 
+    def _poll_image_result(self) -> None:
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        result = None
+        with self._image_result_lock:
+            if self._image_result is not None:
+                result = self._image_result
+                self._image_result = None
+        if result is not None:
+            try:
+                kind, session, *payload = result
+                if session == self._image_session:
+                    if kind == "ok":
+                        source, fitted, announce, path = payload
+                        self._finish_image_wallpaper(
+                            source, fitted, announce, path
+                        )
+                    else:
+                        message, announce, path = payload
+                        self._fail_image_wallpaper(message, announce, path)
+            except tk.TclError:
+                return
+        try:
+            self._image_poll_job = self.root.after(
+                80, self._poll_image_result
+            )
+        except tk.TclError:
+            self._image_poll_job = None
+
+    def _finish_image_wallpaper(
+        self, source, fitted, announce: bool, path: str
+    ) -> None:
         self._stop_wallpaper(clear_image=True)
-        self._wallpaper_source = image
+        self._wallpaper_source = source
         self._wallpaper_path = str(Path(path))
         self._wallpaper_kind = "image"
         self._wallpaper_photo = None
+        self._wallpaper_error_reported = False
         self._update_label_colors()
         self._update_scrims()
-        self._render_image_wallpaper()
+        if fitted is not None:
+            try:
+                photo = ImageTk.PhotoImage(fitted)
+                self.canvas.delete("wallpaper")
+                self.canvas.create_image(
+                    0, 0, anchor="nw", image=photo, tags=("wallpaper",)
+                )
+                self._wallpaper_photo = photo
+                self._stack_canvas_items()
+            except Exception:
+                self._schedule_image_render()
+        else:
+            self._schedule_image_render()
         self._update_appearance_summary()
         self._save_config()
         if announce:
             self._set_status(f"自定义壁纸已启用：{Path(path).name}")
-        return True
+
+    def _fail_image_wallpaper(
+        self, message: str, announce: bool, path: str
+    ) -> None:
+        if announce:
+            messagebox.showerror(
+                "无法打开图片",
+                f"无法读取这个图片：\n{message}",
+                parent=self.root,
+            )
+        else:
+            self._set_status("壁纸图片无法打开", error=True)
+        self._update_appearance_summary()
 
     def _apply_video_wallpaper(self, path: str, announce: bool = True) -> bool:
         if not (HAS_CV2 and HAS_PIL):
@@ -2078,6 +2208,7 @@ class TranslatorApp:
                 self._set_status("壁纸视频无法打开", error=True)
             return False
 
+        self._cancel_image_load()
         self._stop_wallpaper(clear_image=True)
         self._wallpaper_source = None
         self._wallpaper_path = str(Path(path))
@@ -2095,6 +2226,7 @@ class TranslatorApp:
         return True
 
     def _deactivate_wallpaper(self) -> None:
+        self._cancel_image_load()
         self._stop_wallpaper(clear_image=True)
         self._wallpaper_path = ""
         self._wallpaper_kind = ""
@@ -2130,6 +2262,7 @@ class TranslatorApp:
             self._video_job = None
         self._video_queue = None
         self._video_thread = None
+        self._video_error = None
         if clear_image:
             self.canvas.delete("wallpaper")
             self._wallpaper_photo = None
@@ -2171,8 +2304,10 @@ class TranslatorApp:
             )
             self._wallpaper_photo = photo
             self.canvas.tag_lower("wallpaper")
-        except Exception:
-            pass
+        except Exception as exc:
+            if not self._wallpaper_error_reported:
+                self._wallpaper_error_reported = True
+                self._set_status(f"壁纸渲染失败：{exc}", error=True)
 
     # ------------------------------------------------------------------
     # Video wallpaper playback
@@ -2186,6 +2321,7 @@ class TranslatorApp:
         self._video_stop_event = stop_event
         self._video_queue = frame_queue
         self._video_paused = False
+        self._video_error = None
         w = max(2, self.root.winfo_width())
         h = max(2, self.root.winfo_height())
         self._video_target = (w, h)
@@ -2200,6 +2336,10 @@ class TranslatorApp:
     def _video_tick(self, session: int) -> None:
         if session != self._video_session:
             return
+        if self._video_error:
+            error = self._video_error
+            self._video_error = None
+            self._set_status(f"视频壁纸播放失败：{error}", error=True)
         frame = None
         if self._video_queue is not None:
             try:
@@ -2244,9 +2384,13 @@ class TranslatorApp:
                     continue
                 ok, frame = cap.read()
                 if not ok:
+                    if stop_event.is_set():
+                        break
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     ok, frame = cap.read()
                     if not ok:
+                        if session == self._video_session:
+                            self._video_error = "视频无法循环播放"
                         break
                 w, h = self._video_target
                 if w < 2 or h < 2:
@@ -2283,8 +2427,9 @@ class TranslatorApp:
                     stop_event.wait(delay)
                 else:
                     next_time = time.monotonic()
-        except Exception:
-            pass
+        except Exception as exc:
+            if not stop_event.is_set() and session == self._video_session:
+                self._video_error = str(exc)
         finally:
             try:
                 cap.release()
@@ -2319,7 +2464,12 @@ class TranslatorApp:
 
     def _on_close(self) -> None:
         self._stop_video_wallpaper(clear_image=False)
-        for job_name in ("_image_render_job", "_scrim_job"):
+        self._cancel_image_load()
+        for job_name in (
+            "_image_render_job",
+            "_image_poll_job",
+            "_scrim_job",
+        ):
             job = getattr(self, job_name, None)
             if job is not None:
                 try:
@@ -2330,6 +2480,45 @@ class TranslatorApp:
         self._stop_clipboard_polling()
         self._save_config()
         self.root.destroy()
+
+
+def _single_instance_guard():
+    """Return a mutex handle, None, or 'already' on Windows."""
+    if sys.platform != "win32":
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_bool,
+            ctypes.c_wchar_p,
+        ]
+        kernel32.GetLastError.restype = ctypes.c_ulong
+        kernel32.SetLastError.argtypes = [ctypes.c_ulong]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.SetLastError(0)
+        handle = kernel32.CreateMutexW(
+            None, False, "Local\\YiChuangTranslator.SingleInstance"
+        )
+        if not handle:
+            return None
+        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            user32 = ctypes.windll.user32
+            user32.FindWindowW.restype = ctypes.c_void_p
+            user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+            hwnd = user32.FindWindowW(None, APP_NAME)
+            if hwnd:
+                user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+                user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+                user32.ShowWindow(ctypes.c_void_p(hwnd), 9)
+                user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return "already"
+        return handle
+    except Exception:
+        return None
 
 
 def main() -> None:
@@ -2345,9 +2534,18 @@ def main() -> None:
         except Exception:
             pass
 
+    mutex = _single_instance_guard()
+    if mutex == "already":
+        return
+
     root = tk.Tk()
     TranslatorApp(root)
     root.mainloop()
+    if mutex:
+        try:
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(mutex))
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
