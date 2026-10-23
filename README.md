@@ -299,6 +299,14 @@ python create_shortcut.py
 
 Translation text is sent to Google's public endpoint, with MyMemory as a fallback. No text is stored locally. Wallpaper files stay on your computer.
 
-## License
+The project is released under the MIT License; see [LICENSE](LICENSE).
 
-[MIT](LICENSE)
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
+
+你可以自由使用、复制、修改、合并、发布、分发、再许可和/或销售本软件的副本，但需要在所有副本或重要部分中保留原始版权声明和本许可声明。
+
+软件按“原样”提供，不附带任何明示或暗示的担保；作者或版权持有人不对因使用本软件产生的任何索赔、损害或其他责任负责。
+
+完整条款见 [LICENSE](LICENSE)。
